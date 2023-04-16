@@ -94,7 +94,7 @@ def main():
           900),
       host=host,
       port=port,
-      mode='chrome')
+      mode=None)
 
 
 if __name__ == "__main__":
