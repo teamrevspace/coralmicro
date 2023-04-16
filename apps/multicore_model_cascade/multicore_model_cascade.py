@@ -27,8 +27,38 @@ import time
 import tkinter as tk
 import os
 from datetime import datetime
+import json
 
 from PIL import ImageTk, Image
+
+import firebase_admin
+from firebase_admin import credentials, storage
+
+from google.cloud import texttospeech
+
+import openai
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Set up OpenAI
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Set up Google Cloud TTS client
+client = texttospeech.TextToSpeechClient()
+
+# Google text-to-speech configuration
+voice = texttospeech.VoiceSelectionParams(
+    language_code="en-US", name="en-US-Neural2-F", ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
+)
+audio_config = texttospeech.AudioConfig(
+    audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=1.1
+)
+
+# Set up Firebase Storage
+cred = credentials.Certificate("credentials.json")
+firebase_admin.initialize_app(
+    cred, {'storageBucket': 'athena-x.appspot.com'})
 
 MSG_TYPE_SETUP = 0
 MSG_TYPE_IMAGE_DATA = 1
@@ -225,10 +255,14 @@ class PoseCanvas(tk.Frame):
                                                    image=self._tk_image)
         self._text_id = self._canvas.create_text(
             width/2, height / 2, font=f"Helvetica {int(height/20)} bold", fill='white', text="Waiting for Person Detection", state=tk.HIDDEN)
+        self._upload_id = self._canvas.create_text(
+            width/2, height / 2, font=f"Helvetica {int(height/20)} bold", fill='white', text="Saving snapshots...", state=tk.HIDDEN)
         self._canvas.place(x=0, y=0, width=width, height=height)
         self._canvas.bind('<Configure>', self._canvas_configure)
         self.bind('<Configure>', self._configure)
         self._low_power_timer = None
+        self._trigger_done = True
+        self._ai_intro = True
 
     def update_image(self, image):
         self._image = image
@@ -238,6 +272,7 @@ class PoseCanvas(tk.Frame):
         if low_power:
             self._canvas.itemconfigure(self._text_id, state=tk.NORMAL)
             self._canvas.itemconfigure(self._image_id, state=tk.HIDDEN)
+            self._ai_intro = True
         else:
             self._canvas.itemconfigure(self._text_id, state=tk.HIDDEN)
             self._canvas.itemconfigure(self._image_id, state=tk.NORMAL)
@@ -254,6 +289,62 @@ class PoseCanvas(tk.Frame):
                 self._low_power_timer.cancel()
             self._toggle_low_power_message(False)
 
+    def run_openai_completion(self):
+        if not self._trigger_done:
+            # Generate a joke
+            text_completion = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "Athena is a large language model trained by Tony Stark the Iron Man"},
+                    {"role": "user", "content": "Tell me random science fun fact."}
+                ],
+                temperature=0.8)
+            text_response = text_completion.choices.pop().message.content
+            if (self._ai_intro):
+                voice_text = "Hi, my name is Athena. " + text_response
+                self._ai_intro = False
+            else:
+                voice_text = text_response
+
+            # Upload chat response
+            chat_thread = threading.Thread(
+                target=self.upload_chat_log_to_firebase, args=[voice_text])
+            chat_thread.start()
+
+            # Play the audio
+            synthesis_input = texttospeech.SynthesisInput(
+                text=voice_text)
+            audio_response = client.synthesize_speech(
+                input=synthesis_input, voice=voice, audio_config=audio_config
+            )
+            audio_file = "speech.mp3"
+            with open(audio_file, "wb") as out:
+                out.write(audio_response.audio_content)
+            os.system("mpg123 " + audio_file)
+            self._trigger_done = True
+
+    def upload_image_to_firebase(self):
+        # Save the image
+        filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        filepath = os.path.join('snapshots', filename)
+        self._image.save(filepath)
+
+        bucket = storage.bucket()
+        blob = bucket.blob(filepath)
+        blob.upload_from_filename(filepath)
+        os.remove(filepath)
+
+    def upload_chat_log_to_firebase(self, content):
+        # Save the text
+        bucket = storage.bucket()
+        blob = bucket.blob('chat_log.json')
+        json_data = json.loads(blob.download_as_string())
+        print(json_data)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_entry = {'timestamp': timestamp, 'content': content}
+        json_data.append(new_entry)
+        blob.upload_from_string(json.dumps(json_data))
+
     def update_poses(self, poses, r=5, threshold=0.2):
         # flag to indicate if a pose with all keypoints on the face has been detected
         has_face_keypoints = False
@@ -265,18 +356,19 @@ class PoseCanvas(tk.Frame):
                 has_face_keypoints = True
                 break
 
-        if has_face_keypoints:
-            # Save the image
-            filename = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}.jpg"
-            filepath = os.path.join('snapshots', filename)
-            self._image.save(filepath)
+        if not os.path.exists('snapshots'):
+            os.makedirs('snapshots')
 
-        # keep only the most recent 100 images
-        filenames = sorted(os.listdir('snapshots'), reverse=True)
-        for i, filename in enumerate(filenames):
-            if i >= 100:
-                filepath = os.path.join('snapshots', filename)
-                os.remove(filepath)
+        if has_face_keypoints and self._trigger_done:
+            self._trigger_done = False
+
+            completion_thread = threading.Thread(
+                target=self.run_openai_completion)
+            completion_thread.start()
+
+            image_thread = threading.Thread(
+                target=self.upload_image_to_firebase)
+            image_thread.start()
 
         if self.flip_x:
             def fx(x): return self._canvas_width * (1.0 - x / self._width)
