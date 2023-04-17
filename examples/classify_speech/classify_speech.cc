@@ -44,7 +44,7 @@ constexpr int kAudioBufferSize =
 
 constexpr float kThreshold = 0.3;
 constexpr int kTopK = 5;
-constexpr char kModelName[] = "/models/voice_commands_v0.7_edgetpu.tflite";
+constexpr char kModelName[] = "/models/voice_commands_v0.8_edgetpu.tflite";
 constexpr char kLabelsName[] = "/models/labels_gc2.raw.txt";
 
 std::array<int16_t, tensorflow::kKeywordDetectorAudioSize> audio_input;
