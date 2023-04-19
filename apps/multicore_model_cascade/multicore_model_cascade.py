@@ -60,11 +60,13 @@ cred = credentials.Certificate("credentials.json")
 firebase_admin.initialize_app(
     cred, {'storageBucket': 'athena-x.appspot.com'})
 
+# Enable data storage feature
+STORE_MEMORY = False
+
 MSG_TYPE_SETUP = 0
 MSG_TYPE_IMAGE_DATA = 1
 MSG_TYPE_POSE_DATA = 2
 MSG_TYPE_LOW_POWER_MODE = 3
-
 
 Keypoint = collections.namedtuple('Keypoint', ('point', 'score'))
 Point = collections.namedtuple('Point', ('x', 'y'))
@@ -233,7 +235,9 @@ class PoseCanvas(tk.Frame):
         self._canvas_height = event.height
         self._canvas.scale('all', 0, 0, sx, sy)
         self._canvas.itemconfigure(
-            self._text_id, font=f"Helvetica {int(self._canvas_height/20)} bold")
+            self._text_id_fg, font=f"Helvetica {int(self._canvas_height/20)} bold")
+        self._canvas.itemconfigure(
+            self._text_id_bg, font=f"Helvetica {int(self._canvas_height/20)} bold")
         self._update_image(event.width, event.height)
 
     def __init__(self, parent, width, height):
@@ -253,15 +257,17 @@ class PoseCanvas(tk.Frame):
         self._canvas = tk.Canvas(self, bd=0, highlightthickness=0, bg='black')
         self._image_id = self._canvas.create_image(0, 0, anchor='nw',
                                                    image=self._tk_image)
-        self._text_id = self._canvas.create_text(
-            width/2, height / 2, font=f"Helvetica {int(height/20)} bold", fill='white', text="Waiting for Person Detection", state=tk.HIDDEN)
-        self._upload_id = self._canvas.create_text(
-            width/2, height / 2, font=f"Helvetica {int(height/20)} bold", fill='white', text="Saving snapshots...", state=tk.HIDDEN)
+        self._text_id_fg = self._canvas.create_text(
+            width/2-1, height/2-1, font=f"Helvetica {int(height/20)} bold", fill='blue', text="Detecting person...", state=tk.HIDDEN)
+        self._text_id_bg = self._canvas.create_text(
+            width/2, height/2, font=f"Helvetica {int(height/20)} bold", fill='white', text="Detecting person...", state=tk.HIDDEN)
         self._canvas.place(x=0, y=0, width=width, height=height)
         self._canvas.bind('<Configure>', self._canvas_configure)
         self.bind('<Configure>', self._configure)
         self._low_power_timer = None
+        # True if the ai is done processing data
         self._trigger_done = True
+        # True to set the ai to introduce itself before speaking
         self._ai_intro = True
 
     def update_image(self, image):
@@ -270,21 +276,24 @@ class PoseCanvas(tk.Frame):
 
     def _toggle_low_power_message(self, low_power):
         if low_power:
-            self._canvas.itemconfigure(self._text_id, state=tk.NORMAL)
-            self._canvas.itemconfigure(self._image_id, state=tk.HIDDEN)
+            self._canvas.itemconfigure(self._text_id_fg, state=tk.NORMAL)
+            self._canvas.itemconfigure(self._text_id_bg, state=tk.NORMAL)
+            # self._canvas.itemconfigure(self._image_id, state=tk.HIDDEN)
             self._ai_intro = True
         else:
-            self._canvas.itemconfigure(self._text_id, state=tk.HIDDEN)
+            self._canvas.itemconfigure(self._text_id_fg, state=tk.HIDDEN)
+            self._canvas.itemconfigure(self._text_id_bg, state=tk.HIDDEN)
             self._canvas.itemconfigure(self._image_id, state=tk.NORMAL)
 
     def set_low_power(self, low_power):
-        print(f'Low Power toggle: {low_power}')
         if low_power:
-            # Delay 2 seconds before toggling message to prevent quick back and forth.
+            # Delay 2 second before toggling message to prevent quick back and forth.
+            print('Detecting person...')
             self._low_power_timer = threading.Timer(
                 2, self._toggle_low_power_message, [True])
             self._low_power_timer.start()
         else:
+            print('Person detected.')
             if self._low_power_timer:
                 self._low_power_timer.cancel()
             self._toggle_low_power_message(False)
@@ -306,12 +315,11 @@ class PoseCanvas(tk.Frame):
             else:
                 voice_text = text_response
 
-            # Upload chat response
-            chat_thread = threading.Thread(
-                target=self.upload_chat_log_to_firebase, args=[voice_text])
-            chat_thread.start()
-
             # Play the audio
+            print('Talking...')
+            print('-----')
+            print(voice_text)
+            print('-----')
             synthesis_input = texttospeech.SynthesisInput(
                 text=voice_text)
             audio_response = client.synthesize_speech(
@@ -320,11 +328,19 @@ class PoseCanvas(tk.Frame):
             audio_file = "speech.mp3"
             with open(audio_file, "wb") as out:
                 out.write(audio_response.audio_content)
-            os.system("mpg123 " + audio_file)
+            os.system("mpg123 " + audio_file + " >/dev/null 2>&1")
+
+            # Upload chat response
+            if STORE_MEMORY:
+                chat_thread = threading.Thread(
+                    target=self.upload_chat_log_to_firebase, args=[voice_text])
+                chat_thread.start()
+
             self._trigger_done = True
 
     def upload_image_to_firebase(self):
         # Save the image
+        print('Saving snapshot...')
         filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         filepath = os.path.join('snapshots', filename)
         self._image.save(filepath)
@@ -336,10 +352,10 @@ class PoseCanvas(tk.Frame):
 
     def upload_chat_log_to_firebase(self, content):
         # Save the text
+        print('Saving conversation...')
         bucket = storage.bucket()
         blob = bucket.blob('chat_log.json')
         json_data = json.loads(blob.download_as_string())
-        print(json_data)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_entry = {'timestamp': timestamp, 'content': content}
         json_data.append(new_entry)
@@ -361,14 +377,16 @@ class PoseCanvas(tk.Frame):
 
         if has_face_keypoints and self._trigger_done:
             self._trigger_done = False
+            print('Facial features detected.')
 
             completion_thread = threading.Thread(
                 target=self.run_openai_completion)
             completion_thread.start()
 
-            image_thread = threading.Thread(
-                target=self.upload_image_to_firebase)
-            image_thread.start()
+            if STORE_MEMORY:
+                image_thread = threading.Thread(
+                    target=self.upload_image_to_firebase)
+                image_thread.start()
 
         if self.flip_x:
             def fx(x): return self._canvas_width * (1.0 - x / self._width)
@@ -404,7 +422,7 @@ class PoseCanvas(tk.Frame):
 def create_tk(width, height, fullscreen=False, do_stop=lambda: None):
     root = tk.Tk()
     root.attributes('-fullscreen', fullscreen)
-    root.title("Dev Board Micro Multicore Model Cascade")
+    root.title("Athena")
     root.geometry(f'{width}x{height}')
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
@@ -437,7 +455,7 @@ def create_tk(width, height, fullscreen=False, do_stop=lambda: None):
         data = data_queue.get_nowait()
         if isinstance(data, Image.Image):
             c.update_image(data)
-            print('FPS: %.2f' % fps.update())
+            # print('FPS: %.2f' % fps.update())
         elif type(data) == bytes:
             c.set_low_power(True if data == b'\x01' else False)
         else:

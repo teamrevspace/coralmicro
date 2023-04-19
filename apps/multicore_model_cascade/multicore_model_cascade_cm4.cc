@@ -53,7 +53,7 @@ bool DetectPerson(tflite::MicroInterpreter* interpreter) {
   // Get image and copy it into the input tensor.
   coralmicro::CameraFrameFormat fmt{CameraFormat::kY8,
                                     coralmicro::CameraFilterMethod::kBilinear,
-                                    CameraRotation::k270,
+                                    CameraRotation::k0,
                                     kNumCols,
                                     kNumRows,
                                     /*preserve_ration=*/false,
